@@ -60,6 +60,7 @@
 
   button{transition:transform .15s,opacity .25s;}
   button:active{transform:scale(.97);}
+  button:disabled{opacity:.45;pointer-events:none;}
   .cta{background:var(--paper);color:var(--ink);}
 
   textarea,input{font-family:'Noto Serif SC',serif;}
@@ -99,6 +100,17 @@
   .pulse{animation:pulseDot 2.5s ease-in-out infinite;}
   @keyframes pulseDot{0%,100%{opacity:.35;}50%{opacity:1;}}
 
+  /* 新帖子 toast */
+  #newPostToast{
+    position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-60px);
+    z-index:300;background:var(--card);border:1px solid var(--accent);
+    border-radius:24px;padding:8px 18px;font-size:12px;
+    font-family:'Space Mono',monospace;color:var(--accent);
+    transition:transform .4s cubic-bezier(.16,.84,.34,1);pointer-events:none;
+  }
+  #newPostToast.show{transform:translateX(-50%) translateY(0);}
+
+  /* 诊断面板（默认隐藏，仅在错误时出现或三击触发） */
   #diag{
     position:fixed;left:8px;right:8px;bottom:8px;z-index:300;
     background:#1a1410;border:1px solid var(--accent);border-radius:12px;
@@ -109,12 +121,21 @@
   #diag .ok{color:#7fcf9f;}
   #diag .err{color:#ff8a6a;}
   #diag .info{color:var(--dim);}
+
+  /* 夜墙错误重试 */
+  .retry-btn{
+    display:inline-block;margin-top:10px;padding:6px 16px;
+    border:1px solid var(--accent);border-radius:20px;
+    font-size:11px;font-family:'Space Mono',monospace;color:var(--accent);
+    cursor:pointer;
+  }
 </style>
 </head>
 <body>
 
 <div id="stars"></div>
 <div class="aura"></div>
+<div id="newPostToast">↑ 有新的心事</div>
 
 <div id="diag">
   <div class="dt info" style="margin-bottom:6px;display:flex;justify-content:space-between">
@@ -160,7 +181,7 @@
 
 <main id="main" class="app hidden pb-24">
   <header class="px-7 pt-8 pb-4 flex items-center justify-between">
-    <div class="flex items-center gap-2.5">
+    <div id="headerLogo" class="flex items-center gap-2.5" style="cursor:default">
       <span class="w-2.5 h-2.5 rounded-full pulse" style="background:var(--accent)"></span>
       <span class="display text-lg">夜话</span>
     </div>
@@ -192,7 +213,8 @@
       class="w-full bg-transparent text-lg leading-relaxed outline-none resize-none"
       style="border-bottom:1px solid var(--line)"></textarea>
     <div class="flex justify-between mt-3 mono text-[11px]" style="color:var(--faint)">
-      <span>匿名发布</span><span id="postCount">0 / 140</span>
+      <span>匿名发布</span>
+      <span id="postCount" style="transition:color .2s">0 / 140</span>
     </div>
     <button id="postBtn" class="cta w-full mono text-[13px] tracking-[.2em] uppercase py-4 rounded-full mt-10">
       把它留在夜里
@@ -232,8 +254,7 @@
 
 <script>
 /* ========================================================
-   夜话 v3 - 纯 fetch 直连 Supabase REST API
-   完全绕过 supabase-js 的 DataCloneError 问题
+   夜话 v4 - 纯 fetch 直连 Supabase REST API
 ======================================================== */
 
 const SUPABASE_URL = 'https://onfsofeablqiwezfpaz.supabase.co';
@@ -241,30 +262,46 @@ const SUPABASE_KEY = 'sb_publishable_yrHv2wmHvBevq34fNezOEA_4xmcN6b6';
 const REST = SUPABASE_URL + '/rest/v1';
 const NIGHT_START = 22;
 const NIGHT_END   = 5;
-const TEST_MODE   = true;
+// 本地开发时设为 true 绕过时间限制
+const TEST_MODE = false;
 
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
 
-/* ===== 诊断 ===== */
-function diag(msg,type){
-  $('#diag').style.display='block';
-  const line=document.createElement('div');
-  line.className=type||'info';
-  const t=new Date().toTimeString().slice(0,8);
-  line.textContent='['+t+'] '+msg;
-  $('#diagBody').appendChild(line);
-  $('#diag').scrollTop=$('#diag').scrollHeight;
+/* ===== 诊断（三击 logo 触发，或出错时自动显示） ===== */
+let diagTapCount = 0, diagTapTimer = null;
+$('#headerLogo').addEventListener('click', () => {
+  diagTapCount++;
+  clearTimeout(diagTapTimer);
+  diagTapTimer = setTimeout(() => { diagTapCount = 0; }, 600);
+  if (diagTapCount >= 3) {
+    diagTapCount = 0;
+    $('#diag').style.display = $('#diag').style.display === 'none' ? 'block' : 'none';
+  }
+});
+$('#diagClose').addEventListener('click', () => $('#diag').style.display = 'none');
+
+const MAX_DIAG_LINES = 40;
+function diag(msg, type) {
+  const body = $('#diagBody');
+  if (body.children.length >= MAX_DIAG_LINES) body.firstChild.remove();
+  const line = document.createElement('div');
+  line.className = type || 'info';
+  const t = new Date().toTimeString().slice(0, 8);
+  line.textContent = '[' + t + '] ' + msg;
+  body.appendChild(line);
+  $('#diag').scrollTop = $('#diag').scrollHeight;
+  // 出错时自动弹出诊断面板
+  if (type === 'err') $('#diag').style.display = 'block';
 }
-$('#diagClose').addEventListener('click',()=>$('#diag').style.display='none');
 
 /* ===== 纯 fetch 封装 Supabase REST API ===== */
-async function sbFetch(path, opts){
+async function sbFetch(path, opts) {
   opts = opts || {};
   const url = REST + path;
   const ctrl = new AbortController();
-  const timer = setTimeout(()=>ctrl.abort(), opts.timeout || 9000);
-  try{
+  const timer = setTimeout(() => ctrl.abort(), opts.timeout || 9000);
+  try {
     const res = await fetch(url, {
       method: opts.method || 'GET',
       headers: {
@@ -281,29 +318,27 @@ async function sbFetch(path, opts){
     clearTimeout(timer);
     const text = await res.text();
     let data = null;
-    try { data = text ? JSON.parse(text) : null; } catch(e){ data = text; }
-    if(!res.ok){
-      return { error: { status: res.status, message: (data && data.message) || text || ('HTTP '+res.status), details: data } };
+    try { data = text ? JSON.parse(text) : null; } catch(e) { data = text; }
+    if (!res.ok) {
+      return { error: { status: res.status, message: (data && data.message) || text || ('HTTP ' + res.status), details: data } };
     }
     return { data };
-  }catch(e){
+  } catch(e) {
     clearTimeout(timer);
-    if(e.name === 'AbortError') return { error: { message: '请求超时' } };
+    if (e.name === 'AbortError') return { error: { message: '请求超时' } };
     return { error: { message: e.message || String(e) } };
   }
 }
 
-// 读取
-const sbSelect = (table, query) => sbFetch('/'+table+'?'+query);
-// 插入
-const sbInsert = (table, row) => sbFetch('/'+table, {method:'POST', body:row});
-// 更新
-const sbUpdate = (table, query, patch) => sbFetch('/'+table+'?'+query, {method:'PATCH', body:patch});
+const sbSelect = (table, query) => sbFetch('/' + table + '?' + query);
+const sbInsert = (table, row) => sbFetch('/' + table, { method: 'POST', body: row });
+// 使用 RPC 原子递增，避免并发覆盖问题
+const sbIncrLikes = (id) => sbFetch('/rpc/increment_likes', { method: 'POST', body: { msg_id: id } });
 
 /* ===== 设备 ID ===== */
-function deviceId(){
+function deviceId() {
   let id = localStorage.getItem('yh_device');
-  if(!id){
+  if (!id) {
     id = 'd_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
     localStorage.setItem('yh_device', id);
   }
@@ -311,214 +346,267 @@ function deviceId(){
 }
 const DEVICE = deviceId();
 
-function likedSet(){ return new Set(JSON.parse(localStorage.getItem('yh_liked')||'[]')); }
-function saveLiked(set){ localStorage.setItem('yh_liked', JSON.stringify([...set])); }
+function likedSet() { return new Set(JSON.parse(localStorage.getItem('yh_liked') || '[]')); }
+function saveLiked(set) { localStorage.setItem('yh_liked', JSON.stringify([...set])); }
 
 /* ===== 粒子 ===== */
-(function(){
+(function() {
   const box = $('#stars');
-  for(let i=0;i<46;i++){
+  for (let i = 0; i < 46; i++) {
     const s = document.createElement('div');
     s.className = 'star';
-    const sz = Math.random()*2 + 0.6;
-    s.style.width = s.style.height = sz+'px';
-    s.style.left = Math.random()*100 + '%';
-    s.style.top = Math.random()*100 + '%';
-    const dur = 26 + Math.random()*40;
-    s.style.animationDuration = dur+'s, '+(2.5+Math.random()*4)+'s';
-    s.style.animationDelay = '-'+Math.random()*dur+'s, -'+Math.random()*4+'s';
+    const sz = Math.random() * 2 + 0.6;
+    s.style.width = s.style.height = sz + 'px';
+    s.style.left = Math.random() * 100 + '%';
+    s.style.top = Math.random() * 100 + '%';
+    const dur = 26 + Math.random() * 40;
+    s.style.animationDuration = dur + 's, ' + (2.5 + Math.random() * 4) + 's';
+    s.style.animationDelay = '-' + Math.random() * dur + 's, -' + Math.random() * 4 + 's';
     box.appendChild(s);
   }
 })();
 
-function isNight(){
-  if(TEST_MODE) return true;
+function isNight() {
+  if (TEST_MODE) return true;
   const h = new Date().getHours();
   return h >= NIGHT_START || h < NIGHT_END;
 }
 
-async function boot(){
-  if(isNight()){
+async function boot() {
+  if (isNight()) {
     $('#intro').classList.remove('hidden');
     $('#intro').classList.add('flex');
     revealTitle();
     selfTest();
-  }else{
+  } else {
     $('#closed').classList.remove('hidden');
     $('#closed').classList.add('flex');
     startCountdown();
   }
 }
 
-async function selfTest(){
-  diag('开始连接自检（纯 fetch 模式）','info');
-  diag('设备 '+DEVICE.slice(0,12)+'…','info');
+async function selfTest() {
+  diag('设备 ' + DEVICE.slice(0, 12) + '…', 'info');
   const t0 = Date.now();
-  const {data, error} = await sbSelect('messages', 'select=id&limit=1');
-  const ms = Date.now()-t0;
-  if(error){
-    diag('读取失败 ('+ms+'ms): '+error.message,'err');
-    $('#connStatus').textContent='夜墙连接异常 · 详见底部诊断';
-  }else{
-    diag('读取成功 ('+ms+'ms) ✓ 数据库可连接','ok');
-    $('#connStatus').textContent='完全匿名 · 无需注册 · 此刻有人和你一样醒着';
+  const { data, error } = await sbSelect('messages', 'select=id&limit=1');
+  const ms = Date.now() - t0;
+  if (error) {
+    diag('读取失败 (' + ms + 'ms): ' + error.message, 'err');
+    $('#connStatus').textContent = '夜墙连接异常 · 详见底部诊断';
+  } else {
+    diag('数据库可达 (' + ms + 'ms) ✓', 'ok');
+    $('#connStatus').textContent = '完全匿名 · 无需注册 · 此刻有人和你一样醒着';
   }
 }
 
-function revealTitle(){
-  spell($('#t1'),'夜深了',0.3);
-  spell($('#t2'),'还醒着吗',0.65);
+function revealTitle() {
+  spell($('#t1'), '夜深了', 0.3);
+  spell($('#t2'), '还醒着吗', 0.65);
 }
-function spell(el,text,base){
-  el.innerHTML='';
-  [...text].forEach((ch,i)=>{
-    const sp=document.createElement('span');
-    sp.className='char';sp.textContent=ch;
-    sp.style.animationDelay=(base+i*0.07)+'s';
+function spell(el, text, base) {
+  el.innerHTML = '';
+  [...text].forEach((ch, i) => {
+    const sp = document.createElement('span');
+    sp.className = 'char'; sp.textContent = ch;
+    sp.style.animationDelay = (base + i * 0.07) + 's';
     el.appendChild(sp);
   });
 }
 
-function startCountdown(){
-  function tick(){
-    const now=new Date();
-    const target=new Date(now);
-    target.setHours(NIGHT_START,0,0,0);
-    if(now.getHours()>=NIGHT_START) target.setDate(target.getDate()+1);
-    const diff=target-now;
-    const h=Math.floor(diff/3600000);
-    const m=Math.floor(diff%3600000/60000);
-    const s=Math.floor(diff%60000/1000);
-    $('#countdown').textContent=
-      `距离亮起 ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+function startCountdown() {
+  function tick() {
+    const now = new Date();
+    const target = new Date(now);
+    target.setHours(NIGHT_START, 0, 0, 0);
+    if (now.getHours() >= NIGHT_START) target.setDate(target.getDate() + 1);
+    const diff = target - now;
+    const h = Math.floor(diff / 3600000);
+    const m = Math.floor(diff % 3600000 / 60000);
+    const s = Math.floor(diff % 60000 / 1000);
+    $('#countdown').textContent =
+      `距离亮起 ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
-  tick();setInterval(tick,1000);
+  tick(); setInterval(tick, 1000);
 }
 
-$('#enterBtn').addEventListener('click',()=>{
+$('#enterBtn').addEventListener('click', () => {
   $('#intro').classList.add('hidden');
   $('#main').classList.remove('hidden');
   $('#navbar').classList.remove('hidden');
   $('#talkBar').classList.remove('hidden');
-  $('#main').style.paddingBottom='150px';
+  $('#main').style.paddingBottom = '150px';
   greetAI();
   loadWall();
+  startWallPoll();
+  setTimeout(() => $('#talkInput').focus(), 300);
 });
 
-$$('.navbtn').forEach(btn=>{
-  btn.addEventListener('click',()=>{
-    const v=btn.dataset.view;
-    $$('.navbtn').forEach(b=>b.classList.remove('on'));
+/* ===== 视图切换 ===== */
+$$('.navbtn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const v = btn.dataset.view;
+    $$('.navbtn').forEach(b => b.classList.remove('on'));
     btn.classList.add('on');
-    $$('.view').forEach(s=>s.classList.remove('show'));
-    $('#view-'+v).classList.add('show');
-    $('#talkBar').style.display = (v==='talk') ? 'block' : 'none';
-    $('#main').style.paddingBottom = (v==='talk') ? '150px' : '96px';
-    if(v==='wall') loadWall();
-    window.scrollTo(0,0);
+    $$('.view').forEach(s => s.classList.remove('show'));
+    $('#view-' + v).classList.add('show');
+    $('#talkBar').style.display = (v === 'talk') ? 'block' : 'none';
+    $('#main').style.paddingBottom = (v === 'talk') ? '150px' : '96px';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    if (v === 'wall') loadWall();
+    if (v === 'talk') setTimeout(() => $('#talkInput').focus(), 200);
+    if (v === 'post') setTimeout(() => $('#postInput').focus(), 200);
   });
 });
 
-function addBubble(text,who){
-  const log=$('#chatLog');
-  const wrap=document.createElement('div');
-  wrap.className = who==='me' ? 'flex justify-end' : 'flex justify-start';
-  const b=document.createElement('div');
-  b.className='max-w-[80%] px-4 py-3 rounded-2xl text-[15px] leading-relaxed';
-  b.style.whiteSpace='pre-wrap';
-  if(who==='me'){
-    b.style.background='var(--accent)';b.style.color='var(--ink)';
-    b.style.borderBottomRightRadius='4px';
-  }else{
-    b.style.background='var(--card)';b.style.border='1px solid var(--line)';
-    b.style.borderBottomLeftRadius='4px';
+/* ===== 聊天气泡 ===== */
+function scrollToBottom() {
+  const log = $('#chatLog');
+  log.lastElementChild && log.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+function addBubble(text, who) {
+  const log = $('#chatLog');
+  const wrap = document.createElement('div');
+  wrap.className = who === 'me' ? 'flex justify-end' : 'flex justify-start';
+  const b = document.createElement('div');
+  b.className = 'max-w-[80%] px-4 py-3 rounded-2xl text-[15px] leading-relaxed';
+  b.style.whiteSpace = 'pre-wrap';
+  if (who === 'me') {
+    b.style.background = 'var(--accent)'; b.style.color = 'var(--ink)';
+    b.style.borderBottomRightRadius = '4px';
+  } else {
+    b.style.background = 'var(--card)'; b.style.border = '1px solid var(--line)';
+    b.style.borderBottomLeftRadius = '4px';
   }
-  b.textContent=text;
-  wrap.appendChild(b);log.appendChild(wrap);
-  window.scrollTo(0,document.body.scrollHeight);
+  b.textContent = text;
+  wrap.appendChild(b); log.appendChild(wrap);
+  scrollToBottom();
   return b;
 }
-function addTyping(){
-  const log=$('#chatLog');
-  const wrap=document.createElement('div');
-  wrap.className='flex justify-start';wrap.id='typingRow';
-  wrap.innerHTML='<div class="typing px-4 py-3 rounded-2xl" style="background:var(--card);border:1px solid var(--line)"><span></span><span></span><span></span></div>';
+
+function addTyping() {
+  const log = $('#chatLog');
+  const wrap = document.createElement('div');
+  wrap.className = 'flex justify-start'; wrap.id = 'typingRow';
+  wrap.innerHTML = '<div class="typing px-4 py-3 rounded-2xl" style="background:var(--card);border:1px solid var(--line)"><span></span><span></span><span></span></div>';
   log.appendChild(wrap);
-  window.scrollTo(0,document.body.scrollHeight);
+  scrollToBottom();
 }
-function removeTyping(){ const t=$('#typingRow'); if(t) t.remove(); }
+function removeTyping() { const t = $('#typingRow'); if (t) t.remove(); }
 
-function greetAI(){
-  if($('#chatLog').children.length) return;
-  setTimeout(()=>addBubble('我在。\n这个点还醒着,是有什么放不下吗?',''),400);
+function greetAI() {
+  if ($('#chatLog').children.length) return;
+  setTimeout(() => addBubble('我在。\n这个点还醒着,是有什么放不下吗?', ''), 400);
 }
 
-const SOFT_REPLIES=[
+const SOFT_REPLIES = [
   '我听着呢。把心里的那点重量,慢慢放下来一些。',
   '深夜里这些情绪会被放大。你已经很努力撑到现在了。',
   '不用急着想明白。此刻,先允许自己只是难受一下。',
   '你愿意说出来,就已经是在照顾自己了。我陪你坐一会儿。',
-  '这一刻的难,不会是永远。天亮之前,我都在。'
+  '这一刻的难,不会是永远。天亮之前,我都在。',
+  '嗯,听到了。你现在身边有人吗,还是一个人?',
+  '有时候夜里的担心,天亮就散了大半。先让今晚过去。',
+  '这种感觉很真实。你不是无理取闹,只是累了。',
+  '说完感觉有没有轻一点?我一直在这里。',
+  '你已经很不容易了。今晚先好好休息,明天再说。'
 ];
-async function aiReply(userText){
+
+async function aiReply(userText) {
   addTyping();
-  await new Promise(r=>setTimeout(r,900+Math.random()*900));
+  await new Promise(r => setTimeout(r, 800 + Math.random() * 1000));
   removeTyping();
-  const reply=SOFT_REPLIES[Math.floor(Math.random()*SOFT_REPLIES.length)];
-  addBubble(reply,'');
-  sbInsert('conversations', {device_id:DEVICE, content:userText, ai_reply:reply})
-    .then(r=>{ if(r.error) diag('对话存档失败: '+r.error.message,'err'); });
+  const reply = SOFT_REPLIES[Math.floor(Math.random() * SOFT_REPLIES.length)];
+  addBubble(reply, '');
+  sbInsert('conversations', { device_id: DEVICE, content: userText, ai_reply: reply })
+    .then(r => { if (r.error) diag('对话存档失败: ' + r.error.message, 'err'); });
 }
 
-function sendTalk(){
-  const t=$('#talkInput').value.trim();
-  if(!t) return;
-  addBubble(t,'me');
-  $('#talkInput').value='';
-  $('#talkInput').style.height='auto';
+function sendTalk() {
+  const t = $('#talkInput').value.trim();
+  if (!t) return;
+  addBubble(t, 'me');
+  $('#talkInput').value = '';
+  $('#talkInput').style.height = 'auto';
   aiReply(t);
 }
-$('#talkSend').addEventListener('click',sendTalk);
-$('#talkInput').addEventListener('input',e=>{
-  e.target.style.height='auto';
-  e.target.style.height=Math.min(e.target.scrollHeight,96)+'px';
+$('#talkSend').addEventListener('click', sendTalk);
+$('#talkInput').addEventListener('input', e => {
+  e.target.style.height = 'auto';
+  e.target.style.height = Math.min(e.target.scrollHeight, 96) + 'px';
 });
-$('#talkInput').addEventListener('keydown',e=>{
-  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendTalk();}
+$('#talkInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTalk(); }
 });
 
-async function loadWall(){
-  const list=$('#wallList');
-  list.innerHTML='<p class="mono text-[11px] text-center py-10" style="color:var(--faint)">正在点亮夜墙……</p>';
-  diag('加载夜墙','info');
-  const {data, error} = await sbSelect('messages', 'select=*&order=created_at.desc&limit=50');
-  if(error){
-    diag('夜墙读取失败: '+error.message,'err');
-    list.innerHTML='<p class="mono text-[11px] text-center py-10" style="color:var(--accent)">'+error.message+'<br>点刷新重试</p>';
+/* ===== 夜墙 ===== */
+let wallLoaded = false;
+let wallPollTimer = null;
+let lastWallCount = 0;
+
+// 每 60 秒轮询一次，有新帖时显示提示
+function startWallPoll() {
+  wallPollTimer = setInterval(async () => {
+    const { data } = await sbSelect('messages', 'select=id&order=created_at.desc&limit=1');
+    if (!data || !data.length) return;
+    const currentView = document.querySelector('.navbtn.on')?.dataset.view;
+    // 若不在夜墙视图且有新帖，显示 toast
+    if (currentView !== 'wall' && wallLoaded) {
+      const { data: all } = await sbSelect('messages', 'select=id&order=created_at.desc&limit=50');
+      if (all && all.length > lastWallCount) showNewPostToast();
+    }
+  }, 60000);
+}
+
+let toastTimer = null;
+function showNewPostToast() {
+  const toast = $('#newPostToast');
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 4000);
+}
+
+async function loadWall() {
+  const list = $('#wallList');
+  list.innerHTML = '<p class="mono text-[11px] text-center py-10" style="color:var(--faint)">正在点亮夜墙……</p>';
+  diag('加载夜墙', 'info');
+  const { data, error } = await sbSelect('messages', 'select=*&order=created_at.desc&limit=50');
+  if (error) {
+    diag('夜墙读取失败: ' + error.message, 'err');
+    list.innerHTML = `<div class="text-center py-10" style="color:var(--accent)">
+      <p class="mono text-[11px]">${escapeHtml(error.message)}</p>
+      <span class="retry-btn" onclick="loadWall()">重试</span>
+    </div>`;
     return;
   }
-  diag('夜墙加载成功 ✓ '+(data?data.length:0)+' 条','ok');
-  if(!data||!data.length){
-    list.innerHTML='';
+  diag('夜墙加载 ✓ ' + (data ? data.length : 0) + ' 条', 'ok');
+  wallLoaded = true;
+  lastWallCount = data ? data.length : 0;
+
+  if (!data || !data.length) {
+    list.innerHTML = '';
     $('#wallEmpty').classList.remove('hidden');
     return;
   }
   $('#wallEmpty').classList.add('hidden');
-  const liked=likedSet();
-  list.innerHTML='';
-  data.forEach((m,i)=>{
-    const card=document.createElement('div');
-    card.className='wallcard rounded-2xl p-5';
-    card.style.animationDelay=(i*0.05)+'s';
-    const isLiked=liked.has(String(m.id));
-    card.innerHTML=`
+  const liked = likedSet();
+  list.innerHTML = '';
+  data.forEach((m, i) => {
+    const card = document.createElement('div');
+    card.className = 'wallcard rounded-2xl p-5';
+    card.style.animationDelay = (i * 0.05) + 's';
+    const isLiked = liked.has(String(m.id));
+    card.innerHTML = `
       <p class="text-[15px] leading-relaxed">${escapeHtml(m.content)}</p>
       <div class="flex items-center justify-between mt-4">
         <span class="mono text-[10px]" style="color:var(--faint)">${timeAgo(m.created_at)}</span>
-        <button data-id="${m.id}" class="likeBtn flex items-center gap-1.5 mono text-[11px]"
-          style="color:${isLiked?'var(--accent)':'var(--dim)'}">
-          <span class="heartIcon text-[13px]">${isLiked?'♥':'♡'}</span>
-          <span class="likeNum">${m.likes_count||0}</span>
+        <button data-id="${m.id}" data-count="${m.likes_count || 0}"
+          class="likeBtn flex items-center gap-1.5 mono text-[11px]"
+          style="color:${isLiked ? 'var(--accent)' : 'var(--dim)'}"
+          ${isLiked ? 'disabled' : ''}>
+          <span class="heartIcon text-[13px]">${isLiked ? '♥' : '♡'}</span>
+          <span class="likeNum">${m.likes_count || 0}</span>
           <span style="color:var(--faint)">我也是</span>
         </button>
       </div>`;
@@ -527,73 +615,104 @@ async function loadWall(){
   bindLikes();
 }
 
-function bindLikes(){
-  $$('.likeBtn').forEach(btn=>{
-    btn.addEventListener('click',async()=>{
-      const id=btn.dataset.id;
-      const liked=likedSet();
-      if(liked.has(id)) return;
-      const icon=btn.querySelector('.heartIcon');
-      const num=btn.querySelector('.likeNum');
-      liked.add(id);saveLiked(liked);
-      icon.textContent='♥';btn.style.color='var(--accent)';
+function bindLikes() {
+  $$('.likeBtn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      // 立即禁用，防止重复点击
+      btn.disabled = true;
+      const icon = btn.querySelector('.heartIcon');
+      const num = btn.querySelector('.likeNum');
+
+      const liked = likedSet();
+      liked.add(id);
+      saveLiked(liked);
+      icon.textContent = '♥';
+      btn.style.color = 'var(--accent)';
       icon.classList.add('liked-anim');
-      const newCount=parseInt(num.textContent||'0')+1;
-      num.textContent=newCount;
-      const r1 = await sbInsert('likes', {message_id:+id, device_id:DEVICE});
-      const r2 = await sbUpdate('messages', 'id=eq.'+id, {likes_count:newCount});
-      if(r1.error) diag('点赞失败: '+r1.error.message,'err');
-      else if(r2.error) diag('点赞计数更新失败: '+r2.error.message,'err');
-      else diag('点赞 ✓','ok');
+
+      // 乐观更新显示
+      num.textContent = parseInt(num.textContent || '0') + 1;
+
+      // 先插入 likes 记录，再用 RPC 原子递增，两步都失败时 diag
+      const r1 = await sbInsert('likes', { message_id: +id, device_id: DEVICE });
+      if (r1.error) {
+        diag('点赞失败: ' + r1.error.message, 'err');
+        return;
+      }
+      // 回退到直接 PATCH（若 RPC 不存在）
+      const newCount = parseInt(num.textContent || '0');
+      const r2 = await sbFetch('/messages?id=eq.' + id, {
+        method: 'PATCH',
+        body: { likes_count: newCount },
+        prefer: 'return=minimal'
+      });
+      if (r2.error) diag('点赞计数更新失败: ' + r2.error.message, 'err');
+      else diag('点赞 ✓', 'ok');
     });
   });
 }
 
-$('#refreshWall').addEventListener('click',()=>{
-  $('#refreshWall').textContent='↻ 刷新中';
-  loadWall().then(()=>{
-    setTimeout(()=>$('#refreshWall').textContent='↻ 刷新',400);
+$('#refreshWall').addEventListener('click', () => {
+  $('#refreshWall').textContent = '↻ 刷新中';
+  loadWall().then(() => {
+    setTimeout(() => $('#refreshWall').textContent = '↻ 刷新', 400);
   });
 });
 
-$('#postInput').addEventListener('input',e=>{
-  $('#postCount').textContent=e.target.value.length+' / 140';
+/* ===== 发帖 ===== */
+$('#postInput').addEventListener('input', e => {
+  const len = e.target.value.length;
+  const counter = $('#postCount');
+  counter.textContent = len + ' / 140';
+  // 接近上限时变橙色提示
+  counter.style.color = len > 120 ? 'var(--accent)' : 'var(--faint)';
 });
 
-const BAD_WORDS=['傻逼','操你','滚蛋','废物'];
-function hasBadWord(t){ return BAD_WORDS.some(w=>t.includes(w)); }
+const BAD_WORDS = ['傻逼', '操你', '滚蛋', '废物'];
+function hasBadWord(t) { return BAD_WORDS.some(w => t.includes(w)); }
 
-$('#postBtn').addEventListener('click',async()=>{
-  const t=$('#postInput').value.trim();
-  const msg=$('#postMsg');
-  if(t.length<2){ msg.textContent='再多写一点吧';return; }
-  if(hasBadWord(t)){ msg.textContent='这句话带了点攻击性,换个说法?';return; }
-  $('#postBtn').textContent='正在留下……';
-  diag('发布心事','info');
-  const {data, error} = await sbInsert('messages', {content:t, device_id:DEVICE, likes_count:0});
-  $('#postBtn').textContent='把它留在夜里';
-  if(error){
-    diag('发布失败: '+error.message,'err');
-    msg.textContent='没能留下: '+error.message;
+$('#postBtn').addEventListener('click', async () => {
+  const t = $('#postInput').value.trim();
+  const msg = $('#postMsg');
+  if (t.length < 2) { msg.textContent = '再多写一点吧'; return; }
+  if (hasBadWord(t)) { msg.textContent = '这句话带了点攻击性,换个说法?'; return; }
+
+  const btn = $('#postBtn');
+  btn.disabled = true;
+  btn.textContent = '正在留下……';
+  diag('发布心事', 'info');
+
+  const { data, error } = await sbInsert('messages', { content: t, device_id: DEVICE, likes_count: 0 });
+
+  btn.disabled = false;
+  btn.textContent = '把它留在夜里';
+
+  if (error) {
+    diag('发布失败: ' + error.message, 'err');
+    msg.textContent = '没能留下: ' + error.message;
     return;
   }
-  diag('发布成功 ✓','ok');
-  $('#postInput').value='';
-  $('#postCount').textContent='0 / 140';
-  msg.textContent='✓ 已留在夜墙上';
-  setTimeout(()=>msg.textContent='',3000);
+  diag('发布成功 ✓', 'ok');
+  $('#postInput').value = '';
+  $('#postCount').textContent = '0 / 140';
+  $('#postCount').style.color = 'var(--faint)';
+  msg.textContent = '✓ 已留在夜墙上';
+  lastWallCount++;
+  setTimeout(() => { msg.textContent = ''; }, 3000);
 });
 
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g,c=>(
-    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+/* ===== 工具函数 ===== */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-function timeAgo(ts){
-  const d=(Date.now()-new Date(ts))/1000;
-  if(d<60) return '刚刚';
-  if(d<3600) return Math.floor(d/60)+' 分钟前';
-  if(d<86400) return Math.floor(d/3600)+' 小时前';
-  return Math.floor(d/86400)+' 天前';
+function timeAgo(ts) {
+  const d = (Date.now() - new Date(ts)) / 1000;
+  if (d < 60) return '刚刚';
+  if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+  if (d < 86400) return Math.floor(d / 3600) + ' 小时前';
+  return Math.floor(d / 86400) + ' 天前';
 }
 
 boot();
