@@ -262,8 +262,8 @@ const SUPABASE_KEY = 'sb_publishable_yrHv2wmHvBevq34fNezOEA_4xmcN6b6';
 const REST = SUPABASE_URL + '/rest/v1';
 const NIGHT_START = 22;
 const NIGHT_END   = 5;
-// 本地开发时设为 true 绕过时间限制
-const TEST_MODE = false;
+// 设为 true 可绕过夜间时间限制（演示 / 本地开发用）
+const TEST_MODE = true;
 
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
