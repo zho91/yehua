@@ -325,7 +325,9 @@ async function sbFetch(path, opts) {
     return { data };
   } catch(e) {
     clearTimeout(timer);
-    if (e.name === 'AbortError') return { error: { message: '请求超时' } };
+    if (e.name === 'AbortError') return { error: { message: '请求超时，请检查网络' } };
+    // TypeError: Failed to fetch 通常是 Supabase 项目暂停或网络不通
+    if (e instanceof TypeError) return { error: { message: 'Failed to fetch — 请检查 Supabase 项目是否已暂停（app.supabase.com）' } };
     return { error: { message: e.message || String(e) } };
   }
 }
@@ -391,8 +393,10 @@ async function selfTest() {
   const { data, error } = await sbSelect('messages', 'select=id&limit=1');
   const ms = Date.now() - t0;
   if (error) {
-    diag('读取失败 (' + ms + 'ms): ' + error.message, 'err');
-    $('#connStatus').textContent = '夜墙连接异常 · 详见底部诊断';
+    diag('连接失败 (' + ms + 'ms): ' + error.message, 'err');
+    $('#connStatus').textContent = '⚠ 无法连接夜里 · 请查看底部诊断';
+    $('#enterBtn').textContent = '重试连接 →';
+    $('#enterBtn').onclick = () => { location.reload(); };
   } else {
     diag('数据库可达 (' + ms + 'ms) ✓', 'ok');
     $('#connStatus').textContent = '完全匿名 · 无需注册 · 此刻有人和你一样醒着';
